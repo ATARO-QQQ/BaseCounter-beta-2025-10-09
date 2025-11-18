@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>投票ページ</title>
+<style>
+  body { font-family: system-ui, -apple-system, "Hiragino Kaku Gothic ProN", "Noto Sans JP", sans-serif; padding: 1rem; text-align:center; }
+  .card { max-width:480px; margin:2rem auto; border:1px solid #eee; padding:1.2rem; border-radius:12px; box-shadow: 0 2px 8px rgba(0,0,0,0.04); }
+  button { padding: .8rem 1.2rem; font-size:1rem; border-radius:8px; border: none; cursor:pointer; }
+  .confirm { background:#007bff; color:white; }
+  .disabled { opacity:0.6; pointer-events:none; }
+  .error { color:#b00020; margin-top:1rem; }
+</style>
+</head>
+<body>
+  <div class="card" id="app">
+    <h2 id="title">投票</h2>
+    <div id="bodyArea">
+      読み込み中…
+    </div>
+    <div id="error" class="error" role="alert" style="display:none"></div>
+  </div>
+
+<script>
+(() => {
+  // ↓ 必ずここをデプロイ済みの Apps Script Web アプリ URL に差し替える
+  const SCRIPT_WEB_APP_URL = "https://script.google.com/macros/s/AKfycbyd0QYozuIMAENpucEpytcl3RGAp4WDNo0ZkzmyAIGueKE7Kp8YpX6cy6JZdzvoZgK2/exec";
+
+  const MAX_ID = 2000;
+  const params = new URLSearchParams(location.search);
+  const qrIdRaw = params.get('id') || '';
+  const pathDir = location.pathname.replace(/\/[^/]*$/, '/'); // ディレクトリ部分（末尾 / を含む）
+  const app = document.getElementById('app');
+  const bodyArea = document.getElementById('bodyArea');
+  const errorEl = document.getElementById('error');
+
+  function showError(msg) {
+    errorEl.textContent = msg;
+    errorEl.style.display = 'block';
+  }
+
+  function isValidQrId(s) {
+    if (!/^\d{4}$/.test(s)) return false;
+    const n = parseInt(s, 10);
+    return n >= 1 && n <= MAX_ID;
+  }
+
+  // デバイス一意IDを localStorage に保存して再利用（擬似）
+  function getOrCreateClientId() {
+    let cid = localStorage.getItem('voter_client_id');
+    if (!cid) {
+      cid = 'cid-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2,10);
+      try { localStorage.setItem('voter_client_id', cid); } catch(e){}
+    }
+    return cid;
+  }
+
+  const clientId = getOrCreateClientId();
+
+  // 1) 「同じディレクトリのコードは一度しか読み込めない」：scanned_dirs を localStorage で保持
+  try {
+    const scanned = JSON.parse(localStorage.getItem('scanned_dirs') || '[]');
+    if (scanned.includes(pathDir)) {
+      // 二回目の読み込み => エラー扱い
+      bodyArea.innerHTML = '<p>このディレクトリ内のQRコードは既に読み込まれています。エラーが発生しました。</p>';
+      showError('同じディレクトリ内のコードは一度しか読み込めません。');
+      return;
+    }
+  } catch(e) {
+    // ignore
+  }
+
+  // 2) 投票済み端末チェック（localStorage）
+  const votedClientId = localStorage.getItem('voted_client_id');
+  if (votedClientId) {
+    // 既に投票済みの端末は「ご協力ありがとうございました!」のみ表示（表は見せない）
+    app.querySelector('#title').textContent = '';
+    bodyArea.innerHTML = '<p>ご協力ありがとうございました!</p>';
+    return;
+  }
+
+  // QR ID バリデーション
+  const qrId = (qrIdRaw || '').trim();
+  if (!isValidQrId(qrId)) {
+    bodyArea.innerHTML = '<p>無効なQRです。正しいブースのQRコードを読み込んでください。</p>';
+    showError('QR ID が不正です: "' + qrIdRaw + '"');
+    return;
+  }
+
+  // 初回読み込みなら scanned_dirs に今回のディレクトリを追加（読み込んだ瞬間で「読み込み済み」とする）
+  try {
+    const scanned = JSON.parse(localStorage.getItem('scanned_dirs') || '[]');
+    scanned.push(pathDir);
+    localStorage.setItem('scanned_dirs', JSON.stringify(scanned));
+  } catch(e){}
+
+  // 最終確認 UI を出す
+  bodyArea.innerHTML = `
+    <p>本当に投票しますか?</p>
+    <div style="display:flex;gap:.6rem;justify-content:center;margin-top:1rem">
+      <button id="voteBtn" class="confirm">投票する</button>
+      <button id="cancelBtn">キャンセル</button>
+    </div>
+    <p style="margin-top:1rem;font-size:.9rem;color:#666">ブース: ${qrId}</p>
+  `;
+
+  const voteBtn = document.getElementById('voteBtn');
+  const cancelBtn = document.getElementById('cancelBtn');
+
+  cancelBtn.addEventListener('click', () => {
+    bodyArea.innerHTML = '<p>キャンセルされました。</p>';
+  });
+
+  voteBtn.addEventListener('click', async () => {
+    voteBtn.classList.add('disabled');
+    voteBtn.textContent = '送信中…';
+
+    // payload
+    const payload = {
+      qrId: qrId,
+      clientId: clientId,
+      userAgent: navigator.userAgent || '',
+      pathDir: pathDir,
+      timestamp: new Date().toISOString()
+    };
+
+    try {
+      const res = await fetch(SCRIPT_WEB_APP_URL, {
+        method: 'POST',
+        mode: 'cors',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const r = await res.json();
+
+      if (!res.ok || r.status !== 'ok') {
+        // エラー応答
+        const msg = r && r.error ? r.error : ('サーバーエラー: ' + res.status);
+        showError(msg);
+        voteBtn.classList.remove('disabled');
+        voteBtn.textContent = '投票する';
+        return;
+      }
+
+      // 成功時：localStorage に投票済みフラグを残す（他の QR を読み込んでも投票不可）
+      localStorage.setItem('voted_client_id', clientId);
+      // また、表示は「ご協力ありがとうございました!」
+      app.querySelector('#title').textContent = '';
+      bodyArea.innerHTML = '<p>ご協力ありがとうございました!</p>';
+
+    } catch (err) {
+      showError('送信に失敗しました。ネットワークを確認してください。');
+      voteBtn.classList.remove('disabled');
+      voteBtn.textContent = '投票する';
+    }
+  });
+
+})();
+</script>
+</body>
+</html>
